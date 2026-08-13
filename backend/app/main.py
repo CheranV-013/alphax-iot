@@ -30,6 +30,11 @@ with engine.begin() as connection:
     if "browser_version" not in web_visitor_columns: connection.execute(text("ALTER TABLE web_visitors ADD COLUMN browser_version VARCHAR DEFAULT 'Unknown'"))
     if "location_accuracy" not in web_visitor_columns: connection.execute(text("ALTER TABLE web_visitors ADD COLUMN location_accuracy FLOAT"))
     if "location_source" not in web_visitor_columns: connection.execute(text("ALTER TABLE web_visitors ADD COLUMN location_source VARCHAR DEFAULT 'UNKNOWN'"))
+transaction_columns={column["name"] for column in inspect(engine).get_columns("transactions")}
+with engine.begin() as connection:
+    additions={"visitor_id":"VARCHAR","browser":"VARCHAR","operating_system":"VARCHAR","device_type":"VARCHAR","location_accuracy":"FLOAT","location_source":"VARCHAR"}
+    for name,sql_type in additions.items():
+        if name not in transaction_columns: connection.execute(text(f"ALTER TABLE transactions ADD COLUMN {name} {sql_type}"))
 ml=MLEngine(settings.model_dir)
 app=FastAPI(title="AlphaX-IoT Fraud Intelligence API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(","), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -59,6 +64,8 @@ class AnalyzeTransactionIn(BaseModel):
     latitude:float=0
     longitude:float=0
     transaction_velocity:float=Field(default=1,ge=0)
+    visitor_id:str|None=None
+    device_id:str|None=None
 
 def ser(obj):
     d={c.name:getattr(obj,c.name) for c in obj.__table__.columns}
@@ -71,8 +78,18 @@ def iso_timestamp(value:datetime):
 def tx_json(tx, risk=None):
     d=ser(tx); d["risk_score"]=round(risk.final_risk_score,1) if risk else 0; d["decision"]=risk.decision if risk else tx.status; return d
 def user_ctx(db,user_id):
-    u=db.get(User,user_id); ts=db.query(Transaction).filter(Transaction.user_id==user_id).order_by(desc(Transaction.timestamp)).all()
+    u=db.get(User,user_id) if user_id else None; ts=db.query(Transaction).filter(Transaction.user_id==user_id).order_by(desc(Transaction.timestamp)).all() if user_id else []
     return {"baseline":u.baseline_spend if u else 100,"devices":[t.device_id for t in ts[:8]],"last_lat":ts[0].latitude if ts else 11.0168,"last_lon":ts[0].longitude if ts else 76.9558}
+def transaction_actor(db:Session, tx:Transaction):
+    if tx.visitor_id:
+        visitor=db.get(WebVisitor,tx.visitor_id)
+        if visitor: return {"visitor_id":visitor.visitor_id,"device":visitor.device_name or visitor.device_type,"browser":visitor.browser,"os":visitor.operating_system,"ip":visitor.ip_address,"device_type":visitor.device_type}
+    if tx.device_id:
+        device=db.get(Device,tx.device_id)
+        if device: return {"device_id":device.id,"device":device.name,"device_type":device.device_type,"browser":None,"os":None,"ip":None}
+    return None
+def transaction_location(tx):
+    return {"latitude":tx.latitude,"longitude":tx.longitude,"source":tx.location_source or "UNKNOWN","accuracy":tx.location_accuracy}
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -171,9 +188,10 @@ def public_web_visitor(visitor:WebVisitor, include_ip=False):
 def public_iot_visitor(device:Device):
     return {"visitor_id":device.id,"id":device.id,"visitor_type":"IOT","name":device.name,"device_type":device.device_type or "IoT Device","latitude":device.latitude,"longitude":device.longitude,"online":device.online,"last_seen":iso_timestamp(device.last_seen),"vibration":device.vibration,"tamper_detected":device.tamper_detected,"risk_score":device.risk_score}
 def evaluate(db,tx,model_amount=None):
-    dev=db.get(Device,tx.device_id); r=assess(tx,user_ctx(db,tx.user_id),dev,ml,model_amount=model_amount); db.add(RiskAssessment(transaction_id=tx.id,**r)); tx.status=r["decision"]
+    dev=db.get(Device,tx.device_id) if tx.device_id else None; r=assess(tx,user_ctx(db,tx.user_id),dev,ml,model_amount=model_amount); db.add(RiskAssessment(transaction_id=tx.id,**r)); tx.status=r["decision"]
+    actor=transaction_actor(db,tx); actor_label=actor.get("visitor_id") if actor and actor.get("visitor_id") else actor.get("device_id") if actor else "Unknown actor"
     if tx.amount>=settings.transaction_limit:
-        db.add(Alert(severity="critical" if r["decision"]=="BLOCK" else "warning",title="HIGH VALUE TRANSACTION",message=f"Amount: {tx.amount:.2f}. Risk: {r['final_risk_score']:.0f}. Decision: {r['decision']}. Exceeds configured threshold {settings.transaction_limit:.2f}.",transaction_id=tx.id,device_id=tx.device_id))
+        db.add(Alert(severity="critical" if r["decision"]=="BLOCK" else "warning",title="HIGH VALUE TRANSACTION",message=f"Amount: {tx.amount:.2f}. Actor: {actor_label}. Risk: {r['final_risk_score']:.0f}. Decision: {r['decision']}. Exceeds configured threshold {settings.transaction_limit:.2f}.",transaction_id=tx.id,device_id=tx.device_id))
     elif r["decision"] in ("REVIEW","BLOCK"):
         db.add(Alert(severity="critical" if r["decision"]=="BLOCK" else "warning",title="HIGH RISK TRANSACTION",message=f"{tx.id} scored {r['final_risk_score']:.0f}. Decision: {r['decision']}",transaction_id=tx.id,device_id=tx.device_id))
     db.commit(); return r
@@ -189,20 +207,55 @@ def create_tx(payload:TxIn,db:Session=Depends(get_db)):
     tx=Transaction(id=f"TXN-{random.randint(10000,99999)}",timestamp=datetime.now(timezone.utc),**payload.model_dump()); db.add(tx); db.commit(); db.refresh(tx); r=evaluate(db,tx); return tx_json(tx,db.query(RiskAssessment).filter_by(transaction_id=tx.id).first())
 @app.post("/api/transactions/analyze")
 def analyze_transaction(payload:AnalyzeTransactionIn,db:Session=Depends(get_db)):
-    user_id=payload.user_id or "SYSTEM-ANALYZER"
-    if not db.get(User,user_id): db.add(User(id=user_id,name="Dashboard Analyst",email="analyst@alphax.local",baseline_spend=settings.transaction_limit)); db.commit()
-    tx=Transaction(id=f"ANL-{random.randint(100000,999999)}",user_id=user_id,amount=payload.amount,timestamp=utcnow(),merchant="Dashboard Transaction Monitor",ip_address=payload.ip_address,device_id=payload.device_id or "WEB-ANALYZER",latitude=payload.latitude,longitude=payload.longitude,transaction_velocity=payload.transaction_velocity,status="PENDING")
+    visitor=db.get(WebVisitor,payload.visitor_id) if payload.visitor_id else None
+    device=db.get(Device,payload.device_id) if payload.device_id else None
+    if payload.visitor_id and not visitor: raise HTTPException(404,"Unknown visitor actor")
+    if payload.device_id and not device: raise HTTPException(404,"Unknown device actor")
+    if not visitor and not device: raise HTTPException(400,"Select a transaction actor")
+    now=utcnow(); recent_count=0
+    if visitor: recent_count=db.query(func.count(Transaction.id)).filter(Transaction.visitor_id==visitor.visitor_id,Transaction.timestamp>=now-timedelta(minutes=10)).scalar() or 0
+    actor_ip=visitor.ip_address if visitor else None
+    actor_lat=visitor.latitude if visitor else device.latitude
+    actor_lon=visitor.longitude if visitor else device.longitude
+    actor_accuracy=visitor.location_accuracy if visitor else None
+    actor_source=visitor.location_source if visitor else "GPS"
+    actor_browser=visitor.browser if visitor else None
+    actor_os=visitor.operating_system if visitor else None
+    actor_type=visitor.device_type if visitor else device.device_type
+    actor_device=visitor.device_name if visitor else device.id
+    linked_user_id=payload.user_id or (f"VISITOR-{visitor.visitor_id}" if visitor else f"DEVICE-{device.id}")
+    if not db.get(User,linked_user_id): db.add(User(id=linked_user_id,name=f"Anonymous actor {visitor.visitor_id if visitor else device.id}",email=f"{linked_user_id.lower()}@anonymous.local",baseline_spend=settings.transaction_limit)); db.flush()
+    tx=Transaction(id=f"ANL-{random.randint(100000,999999)}",user_id=linked_user_id,visitor_id=visitor.visitor_id if visitor else None,amount=payload.amount,timestamp=now,merchant="Dashboard Transaction Monitor",ip_address=actor_ip,device_id=device.id if device else None,browser=actor_browser,operating_system=actor_os,device_type=actor_type,latitude=actor_lat,longitude=actor_lon,location_accuracy=actor_accuracy,location_source=actor_source,transaction_velocity=payload.transaction_velocity+recent_count,status="PENDING")
     db.add(tx); db.commit(); db.refresh(tx)
     normalized_model_amount=min((payload.amount/max(settings.transaction_limit,1))*500,500)
     r=evaluate(db,tx,model_amount=normalized_model_amount)
     assessment=db.query(RiskAssessment).filter_by(transaction_id=tx.id).first()
     high=payload.amount>=settings.transaction_limit
-    return {"transaction_id":tx.id,"amount":payload.amount,"threshold":settings.transaction_limit,"status":"HIGH_RISK" if high else "NORMAL","risk_score":round(r["final_risk_score"],1),"decision":r["decision"],"alert":high,"reason":"Transaction exceeds configured threshold." if high else "Below configured threshold.","risk":ser(assessment)}
+    if not high and r["decision"] != "ALLOW":
+        # The dashboard monitor's configured business rule explicitly treats
+        # below-limit checks as NORMAL/ALLOW; the full component scores remain
+        # stored for later investigation.
+        r["decision"]="ALLOW"; tx.status="ALLOW"
+        if assessment: assessment.decision="ALLOW"
+        db.commit()
+    actor=transaction_actor(db,tx); location=transaction_location(tx)
+    return {"transaction_id":tx.id,"amount":payload.amount,"threshold":settings.transaction_limit,"status":"HIGH_RISK" if high else "NORMAL","risk_score":round(r["final_risk_score"],1),"decision":r["decision"],"alert":high,"reason":"Transaction exceeds configured threshold." if high else "Below configured threshold.","actor":actor,"location":location,"risk":ser(assessment)}
 @app.get("/api/transactions")
 def transactions(limit:int=50,db:Session=Depends(get_db)):
     rows=[]
-    for t in db.query(Transaction).order_by(desc(Transaction.timestamp)).limit(limit): rows.append(tx_json(t,db.query(RiskAssessment).filter_by(transaction_id=t.id).first()))
+    for t in db.query(Transaction).order_by(desc(Transaction.timestamp)).limit(limit):
+        item=tx_json(t,db.query(RiskAssessment).filter_by(transaction_id=t.id).first()); item["actor"]=transaction_actor(db,t); item["location"]=transaction_location(t); rows.append(item)
     return rows
+@app.get("/api/admin/visitors/{visitor_id}/transactions")
+def visitor_transactions(visitor_id:str,db:Session=Depends(get_db)):
+    if not db.get(WebVisitor,visitor_id): raise HTTPException(404,"Visitor not found")
+    return [{**tx_json(t,db.query(RiskAssessment).filter_by(transaction_id=t.id).first()),"actor":transaction_actor(db,t),"location":transaction_location(t)} for t in db.query(Transaction).filter(Transaction.visitor_id==visitor_id).order_by(desc(Transaction.timestamp)).all()]
+@app.get("/api/admin/transactions/{transaction_id}")
+def investigate_transaction(transaction_id:str,db:Session=Depends(get_db)):
+    t=db.get(Transaction,transaction_id)
+    if not t: raise HTTPException(404,"Transaction not found")
+    risk=db.query(RiskAssessment).filter_by(transaction_id=t.id).first(); actor=transaction_actor(db,t); visitor=db.get(WebVisitor,t.visitor_id) if t.visitor_id else None
+    return {"transaction":tx_json(t,risk),"actor":actor,"location":transaction_location(t),"last_visitor_activity":iso_timestamp(visitor.last_seen) if visitor else None,"risk":ser(risk) if risk else None,"visitor_history":[tx_json(x,db.query(RiskAssessment).filter_by(transaction_id=x.id).first()) for x in db.query(Transaction).filter(Transaction.visitor_id==t.visitor_id).order_by(desc(Transaction.timestamp)).all()] if t.visitor_id else []}
 @app.get("/api/transactions/{id}")
 def transaction(id:str,db:Session=Depends(get_db)):
     t=db.get(Transaction,id); r=db.query(RiskAssessment).filter_by(transaction_id=id).first()

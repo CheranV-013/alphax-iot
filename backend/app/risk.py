@@ -6,9 +6,9 @@ def distance_km(a,b,c,d):
     r=6371; p=math.pi/180; x=(c-a)*p*math.cos((a+b)*p/2); y=(d-b)*p; return math.sqrt(x*x+y*y)*r
 
 def assess(tx, user, device, ml, model_amount=None):
-    location_change=distance_km(user.get("last_lat",tx.latitude),user.get("last_lon",tx.longitude),tx.latitude,tx.longitude)
-    ip_score=0.78 if tx.ip_address.startswith(("185.","45.","103.")) else 0.12
-    known_device=tx.device_id in user.get("devices",[]); device_score=0.82 if not known_device else .08
+    location_change=distance_km(user.get("last_lat"),user.get("last_lon"),tx.latitude,tx.longitude) if None not in (user.get("last_lat"),user.get("last_lon"),tx.latitude,tx.longitude) else 0.0
+    ip_score=0.78 if (tx.ip_address or "").startswith(("185.","45.","103.")) else 0.12
+    known_device=bool(tx.device_id and tx.device_id in user.get("devices",[])); device_score=0.82 if not known_device else .08
     velocity=min(float(tx.transaction_velocity)/10,1); behaviour=min(abs(tx.amount-user.get("baseline",100))/(user.get("baseline",100)*2),1)
     loc_score=min(location_change/80,1)
     tamper=1.0 if device and device.tamper_detected else 0.0

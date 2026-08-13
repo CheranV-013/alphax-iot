@@ -38,8 +38,8 @@ def test_visitor_expiry_and_transactions():
         db.commit()
     assert client.get("/api/online-visitors").status_code == 200
     assert all(v["visitor_id"] != "TEST-VISITOR" for v in client.get("/api/online-visitors").json())
-    normal = client.post("/api/transactions/analyze", json={"amount": 50000}).json()
-    high = client.post("/api/transactions/analyze", json={"amount": 150000}).json()
+    normal = client.post("/api/transactions/analyze", json={"amount": 50000, "visitor_id":"TEST-VISITOR"}).json()
+    high = client.post("/api/transactions/analyze", json={"amount": 150000, "visitor_id":"TEST-VISITOR"}).json()
     assert (normal["status"], normal["decision"], normal["alert"]) == ("NORMAL", "ALLOW", False)
     assert (high["status"], high["decision"], high["alert"]) == ("HIGH_RISK", "REVIEW", True)
 
@@ -48,6 +48,15 @@ def test_iot_regression():
     assert client.post("/api/iot/data", json=payload).status_code == 200
     assert any(d["id"] == "ESP001" for d in client.get("/api/iot/devices").json())
     assert any(v["visitor_type"] == "IOT" for v in client.get("/api/live-visitors").json())
+
+def test_transactions_are_attributed_to_visitor():
+    response=client.post("/api/transactions/analyze",json={"amount":150000,"visitor_id":"TEST-VISITOR"})
+    assert response.status_code == 200
+    body=response.json()
+    assert body["actor"]["visitor_id"] == "TEST-VISITOR"
+    assert body["actor"]["ip"] == "198.51.100.30"
+    assert client.get("/api/admin/visitors/TEST-VISITOR/transactions").status_code == 200
+    assert client.post("/api/transactions/analyze",json={"amount":150000}).status_code == 400
 
 def test_individual_tracking_endpoint():
     response=client.get("/api/admin/live-visitors/TEST-VISITOR")

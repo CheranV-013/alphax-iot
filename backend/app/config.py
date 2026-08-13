@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     geofence_km: float = 1.5
     simulator_enabled: bool = True
     model_dir: str = "models"
-    visitor_inactivity_seconds: int = 90
+    visitor_inactivity_seconds: int = 30
     ip_geolocation_url: str = ""
     ip_geolocation_api_key: str = ""
     trust_proxy_headers: bool = True

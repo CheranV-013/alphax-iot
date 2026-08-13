@@ -68,8 +68,9 @@ Optional IP geolocation settings are:
 ```text
 IP_GEOLOCATION_URL=https://your-provider.example/lookup/{ip}
 IP_GEOLOCATION_API_KEY=provider-key-if-required
-VISITOR_INACTIVITY_SECONDS=90
+VISITOR_INACTIVITY_SECONDS=30
 TRUST_PROXY_HEADERS=true
+TRANSACTION_LIMIT=100000
 ```
 
 The provider URL must return JSON containing common fields such as `country_name`/`country`, `region`/`state_prov`, `city`, and `latitude`/`longitude` (or `lat`/`lon`). If it is unset or fails, the visitor remains tracked with `Unknown` approximate location. Browser exact GPS is not collected.
@@ -83,3 +84,5 @@ New APIs:
 - `GET /api/admin/online-visitors` and `GET /api/admin/live-visitors` — dashboard/admin-shaped feeds that include stored IP addresses; add authentication before exposing these beyond the demo.
 - `POST /api/transactions/analyze` — analyzes a dashboard amount against the configured transaction limit and persists a risk assessment/alert.
 - `GET /api/config/public` — exposes non-sensitive runtime thresholds to the dashboard.
+
+The browser heartbeat runs every 5 seconds and dashboard polling runs every 2 seconds. A web visitor is marked offline after 30 seconds without a heartbeat. IoT locations remain exact device GPS; web locations are approximate IP geolocation only.

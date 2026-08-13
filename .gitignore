@@ -37,6 +37,7 @@ __pycache__/
 *.logbackend/alphax.db
 backend/models/
 alphax.db
+test_alphax.db
 models/
 frontend/node_modules/
 frontend/dist/

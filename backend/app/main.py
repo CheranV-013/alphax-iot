@@ -1,5 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import json
+import ipaddress
 from urllib.parse import quote
 from urllib.request import Request as UrlRequest, urlopen
 from pathlib import Path
@@ -65,17 +66,31 @@ def user_ctx(db,user_id):
 def utcnow():
     return datetime.now(timezone.utc)
 
-def request_ip(request: Request):
-    """Resolve the Render edge's forwarded address, with a socket fallback.
+def _valid_ip(value: str | None):
+    try:
+        return str(ipaddress.ip_address(value.strip())) if value else None
+    except (ValueError, AttributeError):
+        return None
 
-    Render supplies X-Forwarded-For at its trusted edge. We do not accept an
-    IP in the JSON heartbeat body, and never return this value publicly.
+def get_client_ip(request: Request):
+    """Resolve the client IP from Render's trusted proxy chain.
+
+    The JSON heartbeat never accepts an IP. When proxy headers are enabled,
+    use the documented edge headers in priority order and validate every
+    candidate; otherwise fall back to the socket peer.
     """
     if settings.trust_proxy_headers:
-        forwarded=request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",",1)[0].strip()
-    return request.client.host if request.client else "unknown"
+        candidate=_valid_ip(request.headers.get("cf-connecting-ip"))
+        if candidate: return candidate
+        forwarded=request.headers.get("x-forwarded-for","")
+        for value in forwarded.split(","):
+            candidate=_valid_ip(value)
+            if candidate: return candidate
+        candidate=_valid_ip(request.headers.get("x-real-ip"))
+        if candidate: return candidate
+    return _valid_ip(request.client.host if request.client else None) or "unknown"
+
+request_ip=get_client_ip
 
 def parse_user_agent(user_agent: str):
     ua=user_agent or ""
@@ -204,7 +219,7 @@ def device(id:str,db:Session=Depends(get_db)):
 
 @app.post("/api/visitor/heartbeat")
 def visitor_heartbeat(payload:VisitorHeartbeatIn, request:Request, db:Session=Depends(get_db)):
-    now=utcnow(); existing=db.get(WebVisitor,payload.visitor_id); was_online=bool(existing and existing.online); current_ip=request_ip(request)
+    now=utcnow(); existing=db.get(WebVisitor,payload.visitor_id); was_online=bool(existing and existing.online); current_ip=get_client_ip(request)
     user_agent=request.headers.get("user-agent","")
     device_type,browser,operating_system,parsed_device_name,parsed_browser_version=parse_user_agent(user_agent)
     device_type=payload.device_type or device_type; device_name=payload.device_name or parsed_device_name; browser_version=payload.browser_version or parsed_browser_version; operating_system=payload.os_hint or operating_system

@@ -48,3 +48,10 @@ def test_iot_regression():
     assert client.post("/api/iot/data", json=payload).status_code == 200
     assert any(d["id"] == "ESP001" for d in client.get("/api/iot/devices").json())
     assert any(v["visitor_type"] == "IOT" for v in client.get("/api/live-visitors").json())
+
+def test_individual_tracking_endpoint():
+    response=client.get("/api/admin/live-visitors/TEST-VISITOR")
+    assert response.status_code == 200
+    assert response.json()["visitor_id"] == "TEST-VISITOR"
+    assert response.json()["ip_address"] == "198.51.100.30"
+    assert client.get("/api/admin/live-visitors/does-not-exist").status_code == 404

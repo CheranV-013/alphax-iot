@@ -82,7 +82,10 @@ New APIs:
 - `GET /api/live-visitors` — unified IoT and ONLINE visitor response.
 - `GET /api/location-data` — unified exact IoT and approximate web coordinates.
 - `GET /api/admin/online-visitors` and `GET /api/admin/live-visitors` — dashboard/admin-shaped feeds that include stored IP addresses; add authentication before exposing these beyond the demo.
+- `GET /api/admin/live-visitors/{visitor_id}` — latest individual web visitor detail or existing IoT device detail, returning 404 only when the ID does not exist.
 - `POST /api/transactions/analyze` — analyzes a dashboard amount against the configured transaction limit and persists a risk assessment/alert.
 - `GET /api/config/public` — exposes non-sensitive runtime thresholds to the dashboard.
 
 The browser heartbeat runs every 5 seconds and dashboard polling runs every 2 seconds. A web visitor is marked offline after 30 seconds without a heartbeat. IoT locations remain exact device GPS; web locations are approximate IP geolocation only.
+
+For SQLite deployments, the backend uses `NullPool`, WAL mode, a busy timeout, and `check_same_thread=False`; this avoids QueuePool exhaustion during concurrent dashboard polling. If `DATABASE_URL` is PostgreSQL, the engine uses `pool_size=5`, `max_overflow=2`, `pool_timeout=10`, `pool_recycle=1800`, and `pool_pre_ping=True`. Request-scoped sessions are closed by `get_db()`; IP geolocation is performed before the database operation and cached per IP.

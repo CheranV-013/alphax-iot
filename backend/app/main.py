@@ -1,6 +1,7 @@
 from datetime import datetime, timezone, timedelta
 import json
 import ipaddress
+import threading
 from urllib.parse import quote
 from urllib.request import Request as UrlRequest, urlopen
 from pathlib import Path
@@ -10,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func, inspect, text
+from sqlalchemy.exc import IntegrityError, OperationalError
 from .config import settings
 from .database import Base, engine, get_db
 from .models import User, Device, WebVisitor, Transaction, IoTReading, RiskAssessment, Alert, AnalystFeedback
@@ -123,8 +125,11 @@ def parse_user_agent(user_agent: str):
 
 def geo_for_ip(ip: str):
     unknown={"country":"Unknown","region":"Unknown","city":"Unknown","latitude":None,"longitude":None}
+    cached=_GEO_CACHE.get(ip)
+    if cached: return cached.copy()
     url=settings.ip_geolocation_url.strip()
     if not url or ip in ("unknown","127.0.0.1","::1"):
+        _GEO_CACHE[ip]=unknown.copy()
         return unknown
     try:
         target=url.replace("{ip}",quote(ip,safe=""))
@@ -133,16 +138,20 @@ def geo_for_ip(ip: str):
             target += ("&" if "?" in target else "?")+"apiKey="+quote(settings.ip_geolocation_api_key,safe="")
         with urlopen(UrlRequest(target,headers=headers),timeout=2) as response:
             data=json.loads(response.read().decode("utf-8"))
-        return {"country":str(data.get("country_name") or data.get("country") or "Unknown"),"region":str(data.get("region") or data.get("state_prov") or "Unknown"),"city":str(data.get("city") or "Unknown"),"latitude":data.get("latitude",data.get("lat")),"longitude":data.get("longitude",data.get("lon"))}
+        result={"country":str(data.get("country_name") or data.get("country") or "Unknown"),"region":str(data.get("region") or data.get("state_prov") or "Unknown"),"city":str(data.get("city") or "Unknown"),"latitude":data.get("latitude",data.get("lat")),"longitude":data.get("longitude",data.get("lon"))}
+        _GEO_CACHE[ip]=result.copy(); return result
     except Exception:
+        _GEO_CACHE[ip]=unknown.copy()
         return unknown
+
+_GEO_CACHE={}
 
 def mark_stale_visitors(db:Session):
     cutoff=utcnow()-timedelta(seconds=settings.visitor_inactivity_seconds)
     stale=db.query(WebVisitor).filter(WebVisitor.online.is_(True),WebVisitor.last_seen < cutoff).all()
     for visitor in stale:
         visitor.online=False
-        db.add(Alert(severity="info",title="ONLINE VISITOR OFFLINE",message=f"Visitor {visitor.visitor_id} is no longer active"))
+        db.add(Alert(severity="info",title="OFFLINE VISITOR",message=f"Visitor {visitor.visitor_id} is no longer active"))
     if stale: db.commit()
 
 def public_web_visitor(visitor:WebVisitor, include_ip=False):
@@ -200,7 +209,15 @@ def iot(payload:IoTIn,db:Session=Depends(get_db)):
     reading_time=payload.timestamp or datetime.now(timezone.utc)
     if not d:
         d=Device(id=payload.device_id,name=f"{payload.device_id} IoT Device",device_type="ESP8266" if payload.device_id=="ESP001" else "IoT Device",expected_latitude=payload.latitude,expected_longitude=payload.longitude,latitude=payload.latitude,longitude=payload.longitude,vibration=payload.vibration,tamper_detected=tamper,online=payload.online,last_seen=reading_time,risk_score=90 if tamper else 15)
-        db.add(d); db.flush()
+        db.add(d)
+        try:
+            db.flush()
+        except IntegrityError:
+            # Two ESP heartbeats can arrive at the same time on a fresh
+            # deployment. The primary key is the registration lock: reuse the
+            # winner instead of creating a duplicate or returning an error.
+            db.rollback()
+            d=db.get(Device,payload.device_id)
     elif not d.device_type:
         d.device_type="ESP8266" if payload.device_id=="ESP001" else "IoT Device"
     moved=distance_km(d.expected_latitude,d.expected_longitude,payload.latitude,payload.longitude)>settings.geofence_km
@@ -219,21 +236,35 @@ def device(id:str,db:Session=Depends(get_db)):
 
 @app.post("/api/visitor/heartbeat")
 def visitor_heartbeat(payload:VisitorHeartbeatIn, request:Request, db:Session=Depends(get_db)):
-    now=utcnow(); existing=db.get(WebVisitor,payload.visitor_id); was_online=bool(existing and existing.online); current_ip=get_client_ip(request)
+    now=utcnow(); current_ip=get_client_ip(request)
     user_agent=request.headers.get("user-agent","")
     device_type,browser,operating_system,parsed_device_name,parsed_browser_version=parse_user_agent(user_agent)
     device_type=payload.device_type or device_type; device_name=payload.device_name or parsed_device_name; browser_version=payload.browser_version or parsed_browser_version; operating_system=payload.os_hint or operating_system
+    # Resolve before touching the request-scoped DB session. Results are cached
+    # by IP, so normal heartbeats never perform an external lookup.
+    geo=geo_for_ip(current_ip)
+    existing=db.get(WebVisitor,payload.visitor_id); was_online=bool(existing and existing.online)
     if not existing:
-        geo=geo_for_ip(current_ip)
         existing=WebVisitor(visitor_id=payload.visitor_id,ip_address=current_ip,country=geo["country"],region=geo["region"],city=geo["city"],latitude=geo["latitude"],longitude=geo["longitude"],device_type=device_type,device_name=device_name,browser=browser,browser_version=browser_version,operating_system=operating_system,user_agent=user_agent,first_seen=now,last_seen=now,online=True)
         db.add(existing)
     else:
         if existing.ip_address!=current_ip:
-            geo=geo_for_ip(current_ip); existing.ip_address=current_ip; existing.country=geo["country"]; existing.region=geo["region"]; existing.city=geo["city"]; existing.latitude=geo["latitude"]; existing.longitude=geo["longitude"]
+            existing.ip_address=current_ip; existing.country=geo["country"]; existing.region=geo["region"]; existing.city=geo["city"]; existing.latitude=geo["latitude"]; existing.longitude=geo["longitude"]
         existing.last_seen=now; existing.online=True; existing.device_type=device_type; existing.device_name=device_name; existing.browser=browser; existing.browser_version=browser_version; existing.operating_system=operating_system; existing.user_agent=user_agent
     if not was_online:
         db.add(Alert(severity="info",title="ONLINE VISITOR",message=f"Visitor {payload.visitor_id} connected"))
-    db.commit(); db.refresh(existing)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Concurrent first heartbeats for the same anonymous browser can race.
+        # The unique visitor_id wins; retry as an update without duplicating an
+        # online alert or visitor row.
+        db.rollback()
+        existing=db.get(WebVisitor,payload.visitor_id)
+        if not existing: raise
+        existing.ip_address=current_ip; existing.last_seen=now; existing.online=True; existing.device_type=device_type; existing.device_name=device_name; existing.browser=browser; existing.browser_version=browser_version; existing.operating_system=operating_system; existing.user_agent=user_agent
+        db.commit()
+    db.refresh(existing)
     return public_web_visitor(existing)
 
 @app.get("/api/online-visitors")
@@ -263,6 +294,16 @@ def admin_live_visitors(db:Session=Depends(get_db)):
         if visitor.browser_version and visitor.browser_version!="Unknown": item["browser"]=f"{visitor.browser} {visitor.browser_version}"
         web.append(item)
     return [public_iot_visitor(x) for x in db.query(Device).all()]+web
+@app.get("/api/admin/live-visitors/{visitor_id}")
+def admin_live_visitor(visitor_id:str, db:Session=Depends(get_db)):
+    device=db.get(Device,visitor_id)
+    if device: return public_iot_visitor(device)
+    mark_stale_visitors(db)
+    visitor=db.get(WebVisitor,visitor_id)
+    if not visitor: raise HTTPException(404,"Visitor not found")
+    item=public_web_visitor(visitor,include_ip=True)
+    item["name"]=f"Visitor {visitor.visitor_id} · IP: {visitor.ip_address or 'Unknown'}"
+    return item
 @app.get("/api/location-data")
 def locations(db:Session=Depends(get_db)):
     mark_stale_visitors(db)

@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, Index
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -26,6 +26,7 @@ class Device(Base):
     online: Mapped[bool] = mapped_column(Boolean, default=True)
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     risk_score: Mapped[float] = mapped_column(Float, default=0)
+    __table_args__ = (Index("ix_devices_online", "online"), Index("ix_devices_last_seen", "last_seen"))
 
 class WebVisitor(Base):
     __tablename__ = "web_visitors"
@@ -45,6 +46,7 @@ class WebVisitor(Base):
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     online: Mapped[bool] = mapped_column(Boolean, default=True)
+    __table_args__ = (Index("ix_web_visitors_online", "online"), Index("ix_web_visitors_last_seen", "last_seen"))
 
 class Transaction(Base):
     __tablename__ = "transactions"
@@ -59,6 +61,7 @@ class Transaction(Base):
     longitude: Mapped[float] = mapped_column(Float)
     transaction_velocity: Mapped[float] = mapped_column(Float, default=1)
     status: Mapped[str] = mapped_column(String, default="ALLOW")
+    __table_args__ = (Index("ix_transactions_timestamp", "timestamp"),)
 
 class IoTReading(Base):
     __tablename__ = "iot_readings"
@@ -97,6 +100,7 @@ class Alert(Base):
     device_id: Mapped[str | None] = mapped_column(String, nullable=True)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (Index("ix_alerts_created_at", "created_at"),)
 
 class AnalystFeedback(Base):
     __tablename__ = "analyst_feedback"

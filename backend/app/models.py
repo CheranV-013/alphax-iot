@@ -27,6 +27,23 @@ class Device(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     risk_score: Mapped[float] = mapped_column(Float, default=0)
 
+class WebVisitor(Base):
+    __tablename__ = "web_visitors"
+    visitor_id: Mapped[str] = mapped_column(String, primary_key=True)
+    ip_address: Mapped[str | None] = mapped_column(String, nullable=True)
+    country: Mapped[str] = mapped_column(String, default="Unknown")
+    region: Mapped[str] = mapped_column(String, default="Unknown")
+    city: Mapped[str] = mapped_column(String, default="Unknown")
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    device_type: Mapped[str] = mapped_column(String, default="Unknown")
+    browser: Mapped[str] = mapped_column(String, default="Unknown")
+    operating_system: Mapped[str] = mapped_column(String, default="Unknown")
+    user_agent: Mapped[str] = mapped_column(Text, default="")
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    online: Mapped[bool] = mapped_column(Boolean, default=True)
+
 class Transaction(Base):
     __tablename__ = "transactions"
     id: Mapped[str] = mapped_column(String, primary_key=True)

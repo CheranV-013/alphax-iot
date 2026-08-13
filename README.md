@@ -33,6 +33,7 @@ For the current deployment, set the Vercel project environment variable `VITE_AP
 - Transparent prototype risk fusion: fraud probability 25%, anomaly 20%, behaviour 15%, IP 10%, device 10%, location 10%, IoT tamper 10%. Decisions: ALLOW 0–39, REVIEW 40–69, BLOCK 70–100.
 - Demo seed data: 120 transactions, 12 users, 5 terminals, suspicious patterns, alerts, and risk assessments.
 - IoT geofence/tamper processing. Simulator emits realistic movement, heartbeat, vibration, offline, and tamper events.
+- Anonymous web visitor monitoring: browser-generated visitor ID, Render forwarded-IP enrichment, user-agent parsing, optional approximate IP geolocation, 20-second heartbeat, inactivity expiry, and unified IoT/ONLINE visitor feeds. Raw IP and user-agent are never returned by public visitor APIs.
 - Dark SOC dashboard with risk charts, GPS-style live device map, visitors, alerts, transactions, and `/demo` presentation mode.
 - `iot/esp8266/alphax_iot.ino` sends GPS + vibration JSON over HTTP. Set Wi-Fi, backend URL, device ID, and threshold at the top of the sketch.
 
@@ -46,3 +47,35 @@ curl -X POST http://localhost:8000/api/feedback -H 'content-type: application/js
 ## Notes
 
 This is a prototype using synthetic/demo data; the displayed evaluation metrics are calculated from a held-out synthetic dataset and are not real-world performance claims. Configure `DATABASE_URL`, `CORS_ORIGINS`, `VIBRATION_THRESHOLD`, and `GEOFENCE_KM` with environment variables if needed.
+
+### Production visitor configuration
+
+Keep the Vercel build variable set to:
+
+```text
+VITE_API_URL=https://alphax-backend-dexi.onrender.com
+```
+
+Keep Render CORS configured with:
+
+```text
+CORS_ORIGINS=https://alphax-iot.vercel.app,http://localhost:5173
+```
+
+Optional IP geolocation settings are:
+
+```text
+IP_GEOLOCATION_URL=https://your-provider.example/lookup/{ip}
+IP_GEOLOCATION_API_KEY=provider-key-if-required
+VISITOR_INACTIVITY_SECONDS=90
+TRUST_PROXY_HEADERS=true
+```
+
+The provider URL must return JSON containing common fields such as `country_name`/`country`, `region`/`state_prov`, `city`, and `latitude`/`longitude` (or `lat`/`lon`). If it is unset or fails, the visitor remains tracked with `Unknown` approximate location. Browser exact GPS is not collected.
+
+New APIs:
+
+- `POST /api/visitor/heartbeat` — creates or refreshes an anonymous web visitor.
+- `GET /api/online-visitors` — active web visitors only, with no raw IP.
+- `GET /api/live-visitors` — unified IoT and ONLINE visitor response.
+- `GET /api/location-data` — unified exact IoT and approximate web coordinates.

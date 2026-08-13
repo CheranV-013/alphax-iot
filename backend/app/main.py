@@ -5,14 +5,20 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, inspect, text
 from .config import settings
 from .database import Base, engine, get_db
 from .models import User, Device, Transaction, IoTReading, RiskAssessment, Alert, AnalystFeedback
 from .ml_engine import MLEngine
 from .risk import assess, distance_km
 
-Base.metadata.create_all(bind=engine); ml=MLEngine(settings.model_dir)
+Base.metadata.create_all(bind=engine)
+# Keep existing SQLite/Render databases compatible when the device type column is
+# added after the first deployment. This is intentionally idempotent.
+if "device_type" not in {column["name"] for column in inspect(engine).get_columns("devices")}:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE devices ADD COLUMN device_type VARCHAR"))
+ml=MLEngine(settings.model_dir)
 app=FastAPI(title="AlphaX-IoT Fraud Intelligence API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(","), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -20,6 +26,7 @@ class TxIn(BaseModel):
     user_id:str; amount:float=Field(gt=0); merchant:str; ip_address:str; device_id:str; latitude:float; longitude:float; transaction_velocity:float=Field(default=1,ge=0)
 class IoTIn(BaseModel):
     device_id:str; latitude:float; longitude:float; vibration:float=Field(ge=0); timestamp:datetime|None=None; online:bool=True
+    tamper_detected:bool|None=None
 class FeedbackIn(BaseModel):
     transaction_id:str; label:str; note:str=""
 
@@ -61,9 +68,15 @@ def risk(transaction_id:str,db:Session=Depends(get_db)):
 @app.post("/api/iot/data")
 def iot(payload:IoTIn,db:Session=Depends(get_db)):
     d=db.get(Device,payload.device_id)
-    if not d: raise HTTPException(404,"Unknown device")
-    tamper=payload.vibration>settings.vibration_threshold; moved=distance_km(d.expected_latitude,d.expected_longitude,payload.latitude,payload.longitude)>settings.geofence_km
-    d.latitude=payload.latitude; d.longitude=payload.longitude; d.vibration=payload.vibration; d.tamper_detected=tamper; d.online=payload.online; d.last_seen=payload.timestamp or datetime.now(timezone.utc); d.risk_score=90 if tamper or moved else 15
+    tamper=payload.vibration>settings.vibration_threshold or payload.tamper_detected is True
+    reading_time=payload.timestamp or datetime.now(timezone.utc)
+    if not d:
+        d=Device(id=payload.device_id,name=f"{payload.device_id} IoT Device",device_type="ESP8266" if payload.device_id=="ESP001" else "IoT Device",expected_latitude=payload.latitude,expected_longitude=payload.longitude,latitude=payload.latitude,longitude=payload.longitude,vibration=payload.vibration,tamper_detected=tamper,online=payload.online,last_seen=reading_time,risk_score=90 if tamper else 15)
+        db.add(d); db.flush()
+    elif not d.device_type:
+        d.device_type="ESP8266" if payload.device_id=="ESP001" else "IoT Device"
+    moved=distance_km(d.expected_latitude,d.expected_longitude,payload.latitude,payload.longitude)>settings.geofence_km
+    d.latitude=payload.latitude; d.longitude=payload.longitude; d.vibration=payload.vibration; d.tamper_detected=tamper; d.online=payload.online; d.last_seen=reading_time; d.risk_score=90 if tamper or moved else 15
     db.add(IoTReading(device_id=d.id,latitude=payload.latitude,longitude=payload.longitude,vibration=payload.vibration,tamper_detected=tamper,online=payload.online,timestamp=d.last_seen))
     if tamper: db.add(Alert(severity="critical",title="IOT TAMPER DETECTED",message=f"{d.id}: vibration {payload.vibration:.2f}",device_id=d.id))
     if moved: db.add(Alert(severity="critical",title="GEOFENCE BREACH",message=f"{d.id}: unexpected GPS movement",device_id=d.id))
@@ -99,4 +112,3 @@ def timeline(db:Session=Depends(get_db)):
     rows=db.query(Transaction).order_by(Transaction.timestamp).limit(100).all(); return [{"time":t.timestamp.strftime("%H:%M"),"risk":round((db.query(RiskAssessment).filter_by(transaction_id=t.id).first().final_risk_score if db.query(RiskAssessment).filter_by(transaction_id=t.id).first() else 0),1)} for t in rows]
 @app.get("/api/demo/state")
 def demo_state(): return {"steps":[{"label":"Normal payment","detail":"Baseline transaction accepted","icon":"✓"},{"label":"New device","detail":"Device novelty increases risk","icon":"⌁"},{"label":"GPS anomaly","detail":"Terminal leaves geofence","icon":"⌖"},{"label":"Tamper spike","detail":"Vibration sensor triggers","icon":"⚠"},{"label":"Block decision","detail":"Cyber-physical risk fusion blocks payment","icon":"■"}]}
-

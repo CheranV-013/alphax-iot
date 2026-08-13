@@ -16,6 +16,7 @@ class Device(Base):
     __tablename__ = "devices"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String)
+    device_type: Mapped[str | None] = mapped_column(String, nullable=True, default="IoT Terminal")
     expected_latitude: Mapped[float] = mapped_column(Float)
     expected_longitude: Mapped[float] = mapped_column(Float)
     latitude: Mapped[float] = mapped_column(Float)
@@ -85,4 +86,3 @@ class AnalystFeedback(Base):
     label: Mapped[str] = mapped_column(String)
     note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-

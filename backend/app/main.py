@@ -28,6 +28,8 @@ web_visitor_columns={column["name"] for column in inspect(engine).get_columns("w
 with engine.begin() as connection:
     if "device_name" not in web_visitor_columns: connection.execute(text("ALTER TABLE web_visitors ADD COLUMN device_name VARCHAR DEFAULT 'Unknown'"))
     if "browser_version" not in web_visitor_columns: connection.execute(text("ALTER TABLE web_visitors ADD COLUMN browser_version VARCHAR DEFAULT 'Unknown'"))
+    if "location_accuracy" not in web_visitor_columns: connection.execute(text("ALTER TABLE web_visitors ADD COLUMN location_accuracy FLOAT"))
+    if "location_source" not in web_visitor_columns: connection.execute(text("ALTER TABLE web_visitors ADD COLUMN location_source VARCHAR DEFAULT 'UNKNOWN'"))
 ml=MLEngine(settings.model_dir)
 app=FastAPI(title="AlphaX-IoT Fraud Intelligence API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(","), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -43,6 +45,10 @@ class VisitorHeartbeatIn(BaseModel):
     browser_version:str|None=None
     device_type:str|None=None
     os_hint:str|None=None
+    latitude:float|None=None
+    longitude:float|None=None
+    location_accuracy:float|None=Field(default=None,ge=0)
+    location_source:str|None=None
 class FeedbackIn(BaseModel):
     transaction_id:str; label:str; note:str=""
 class AnalyzeTransactionIn(BaseModel):
@@ -155,7 +161,7 @@ def mark_stale_visitors(db:Session):
     if stale: db.commit()
 
 def public_web_visitor(visitor:WebVisitor, include_ip=False):
-    result={"id":visitor.visitor_id,"visitor_id":visitor.visitor_id,"visitor_type":"ONLINE","name":f"Visitor {visitor.visitor_id}","device_type":visitor.device_type,"device_name":visitor.device_name,"browser":visitor.browser,"browser_version":visitor.browser_version,"os":visitor.operating_system,"country":visitor.country,"region":visitor.region,"city":visitor.city,"latitude":visitor.latitude,"longitude":visitor.longitude,"online":visitor.online,"last_seen":visitor.last_seen.isoformat(),"first_seen":visitor.first_seen.isoformat()}
+    result={"id":visitor.visitor_id,"visitor_id":visitor.visitor_id,"visitor_type":"ONLINE","name":f"Visitor {visitor.visitor_id}","device_type":visitor.device_type,"device_name":visitor.device_name,"browser":visitor.browser,"browser_version":visitor.browser_version,"os":visitor.operating_system,"operating_system":visitor.operating_system,"country":visitor.country,"region":visitor.region,"city":visitor.city,"latitude":visitor.latitude,"longitude":visitor.longitude,"location_accuracy":visitor.location_accuracy,"location_source":visitor.location_source,"online":visitor.online,"last_seen":visitor.last_seen.isoformat(),"first_seen":visitor.first_seen.isoformat()}
     if include_ip: result["ip_address"]=visitor.ip_address
     return result
 
@@ -243,13 +249,19 @@ def visitor_heartbeat(payload:VisitorHeartbeatIn, request:Request, db:Session=De
     # Resolve before touching the request-scoped DB session. Results are cached
     # by IP, so normal heartbeats never perform an external lookup.
     geo=geo_for_ip(current_ip)
+    has_gps=payload.latitude is not None and payload.longitude is not None and payload.location_source == "GPS"
     existing=db.get(WebVisitor,payload.visitor_id); was_online=bool(existing and existing.online)
     if not existing:
-        existing=WebVisitor(visitor_id=payload.visitor_id,ip_address=current_ip,country=geo["country"],region=geo["region"],city=geo["city"],latitude=geo["latitude"],longitude=geo["longitude"],device_type=device_type,device_name=device_name,browser=browser,browser_version=browser_version,operating_system=operating_system,user_agent=user_agent,first_seen=now,last_seen=now,online=True)
+        existing=WebVisitor(visitor_id=payload.visitor_id,ip_address=current_ip,country=geo["country"],region=geo["region"],city=geo["city"],latitude=payload.latitude if has_gps else geo["latitude"],longitude=payload.longitude if has_gps else geo["longitude"],location_accuracy=payload.location_accuracy if has_gps else None,location_source="GPS" if has_gps else ("IP" if geo["latitude"] is not None else "UNKNOWN"),device_type=device_type,device_name=device_name,browser=browser,browser_version=browser_version,operating_system=operating_system,user_agent=user_agent,first_seen=now,last_seen=now,online=True)
         db.add(existing)
     else:
         if existing.ip_address!=current_ip:
-            existing.ip_address=current_ip; existing.country=geo["country"]; existing.region=geo["region"]; existing.city=geo["city"]; existing.latitude=geo["latitude"]; existing.longitude=geo["longitude"]
+            existing.ip_address=current_ip; existing.country=geo["country"]; existing.region=geo["region"]; existing.city=geo["city"]
+            if existing.location_source!="GPS": existing.latitude=geo["latitude"]; existing.longitude=geo["longitude"]
+        if has_gps:
+            existing.latitude=payload.latitude; existing.longitude=payload.longitude; existing.location_accuracy=payload.location_accuracy; existing.location_source="GPS"
+        elif existing.location_source!="GPS":
+            existing.latitude=geo["latitude"]; existing.longitude=geo["longitude"]; existing.location_accuracy=None; existing.location_source="IP" if geo["latitude"] is not None else "UNKNOWN"
         existing.last_seen=now; existing.online=True; existing.device_type=device_type; existing.device_name=device_name; existing.browser=browser; existing.browser_version=browser_version; existing.operating_system=operating_system; existing.user_agent=user_agent
     if not was_online:
         db.add(Alert(severity="info",title="ONLINE VISITOR",message=f"Visitor {payload.visitor_id} connected"))

@@ -37,6 +37,8 @@ class WebVisitor(Base):
     city: Mapped[str] = mapped_column(String, default="Unknown")
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    location_accuracy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    location_source: Mapped[str] = mapped_column(String, default="UNKNOWN")
     device_type: Mapped[str] = mapped_column(String, default="Unknown")
     device_name: Mapped[str] = mapped_column(String, default="Unknown")
     browser: Mapped[str] = mapped_column(String, default="Unknown")

@@ -5,7 +5,7 @@
 // Configure these values before flashing the board.
 const char* WIFI_SSID = "YOUR_WIFI_SSID";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-const char* BACKEND_URL = "http://YOUR_COMPUTER_IP:8000/api/iot/data";
+const char* BACKEND_URL = "https://alphax-backend-dexi.onrender.com/api/iot/data";
 const char* DEVICE_ID = "ESP001";
 const float VIBRATION_THRESHOLD = 0.50;
 const int VIBRATION_PIN = A0;

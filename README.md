@@ -22,6 +22,10 @@ npm run dev
 
 Open `http://localhost:5173`, then open `/demo` for the controlled scenario. In a third terminal, run `python scripts/simulate_iot.py` for changing device telemetry. Swagger is at `http://localhost:8000/docs`.
 
+## Deployment
+
+For the current deployment, set the Vercel project environment variable `VITE_API_URL` to `https://alphax-backend-dexi.onrender.com`, then redeploy the frontend. The frontend also defaults to that Render URL when the variable is absent. Set Render `CORS_ORIGINS` to `https://alphax-iot.vercel.app,http://localhost:5173`. The included `render.yaml` documents the backend service configuration. After deploying a backend change, use `/api/health` and `/docs` on the Render URL to verify it is live.
+
 ## What is implemented
 
 - FastAPI + SQLite APIs for transactions, risk, IoT, devices, visitors, alerts, feedback, dashboard summary/timeline, and health.

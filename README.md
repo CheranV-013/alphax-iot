@@ -88,4 +88,6 @@ New APIs:
 
 The browser heartbeat runs every 5 seconds and dashboard polling runs every 2 seconds. A web visitor is marked offline after 30 seconds without a heartbeat. IoT locations remain exact device GPS; web locations are approximate IP geolocation only.
 
+The frontend determines backend status only from `/api/health`; a successful 2xx health response keeps the system online even if a secondary dashboard endpoint fails. Dashboard refresh uses `Promise.allSettled()` and skips a new cycle while the prior cycle is still running. Vite production builds must set `VITE_API_URL=https://alphax-backend-dexi.onrender.com` and be redeployed after changing it.
+
 For SQLite deployments, the backend uses `NullPool`, WAL mode, a busy timeout, and `check_same_thread=False`; this avoids QueuePool exhaustion during concurrent dashboard polling. If `DATABASE_URL` is PostgreSQL, the engine uses `pool_size=5`, `max_overflow=2`, `pool_timeout=10`, `pool_recycle=1800`, and `pool_pre_ping=True`. Request-scoped sessions are closed by `get_db()`; IP geolocation is performed before the database operation and cached per IP.

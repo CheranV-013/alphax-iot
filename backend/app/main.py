@@ -63,8 +63,11 @@ class AnalyzeTransactionIn(BaseModel):
 def ser(obj):
     d={c.name:getattr(obj,c.name) for c in obj.__table__.columns}
     for k,v in d.items():
-        if isinstance(v,datetime): d[k]=v.isoformat()
+        if isinstance(v,datetime): d[k]=iso_timestamp(v)
     return d
+def iso_timestamp(value:datetime):
+    aware=value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return aware.astimezone(timezone.utc).isoformat().replace('+00:00','Z')
 def tx_json(tx, risk=None):
     d=ser(tx); d["risk_score"]=round(risk.final_risk_score,1) if risk else 0; d["decision"]=risk.decision if risk else tx.status; return d
 def user_ctx(db,user_id):
@@ -161,12 +164,12 @@ def mark_stale_visitors(db:Session):
     if stale: db.commit()
 
 def public_web_visitor(visitor:WebVisitor, include_ip=False):
-    result={"id":visitor.visitor_id,"visitor_id":visitor.visitor_id,"visitor_type":"ONLINE","name":f"Visitor {visitor.visitor_id}","device_type":visitor.device_type,"device_name":visitor.device_name,"browser":visitor.browser,"browser_version":visitor.browser_version,"os":visitor.operating_system,"operating_system":visitor.operating_system,"country":visitor.country,"region":visitor.region,"city":visitor.city,"latitude":visitor.latitude,"longitude":visitor.longitude,"location_accuracy":visitor.location_accuracy,"location_source":visitor.location_source,"online":visitor.online,"last_seen":visitor.last_seen.isoformat(),"first_seen":visitor.first_seen.isoformat()}
+    result={"id":visitor.visitor_id,"visitor_id":visitor.visitor_id,"visitor_type":"ONLINE","name":f"Visitor {visitor.visitor_id}","device_type":visitor.device_type,"device_name":visitor.device_name,"browser":visitor.browser,"browser_version":visitor.browser_version,"os":visitor.operating_system,"operating_system":visitor.operating_system,"country":visitor.country,"region":visitor.region,"city":visitor.city,"latitude":visitor.latitude,"longitude":visitor.longitude,"location_accuracy":visitor.location_accuracy,"location_source":visitor.location_source,"online":visitor.online,"last_seen":iso_timestamp(visitor.last_seen),"first_seen":iso_timestamp(visitor.first_seen)}
     if include_ip: result["ip_address"]=visitor.ip_address
     return result
 
 def public_iot_visitor(device:Device):
-    return {"visitor_id":device.id,"id":device.id,"visitor_type":"IOT","name":device.name,"device_type":device.device_type or "IoT Device","latitude":device.latitude,"longitude":device.longitude,"online":device.online,"last_seen":device.last_seen.isoformat(),"vibration":device.vibration,"tamper_detected":device.tamper_detected,"risk_score":device.risk_score}
+    return {"visitor_id":device.id,"id":device.id,"visitor_type":"IOT","name":device.name,"device_type":device.device_type or "IoT Device","latitude":device.latitude,"longitude":device.longitude,"online":device.online,"last_seen":iso_timestamp(device.last_seen),"vibration":device.vibration,"tamper_detected":device.tamper_detected,"risk_score":device.risk_score}
 def evaluate(db,tx,model_amount=None):
     dev=db.get(Device,tx.device_id); r=assess(tx,user_ctx(db,tx.user_id),dev,ml,model_amount=model_amount); db.add(RiskAssessment(transaction_id=tx.id,**r)); tx.status=r["decision"]
     if tx.amount>=settings.transaction_limit:
@@ -319,8 +322,8 @@ def admin_live_visitor(visitor_id:str, db:Session=Depends(get_db)):
 @app.get("/api/location-data")
 def locations(db:Session=Depends(get_db)):
     mark_stale_visitors(db)
-    iot_locations=[{"device_id":x.id,"visitor_type":"IOT","latitude":x.latitude,"longitude":x.longitude,"risk_score":x.risk_score,"tamper":x.tamper_detected,"online":x.online,"last_seen":x.last_seen.isoformat()} for x in db.query(Device).all()]
-    web_locations=[{"device_id":x.visitor_id,"visitor_type":"ONLINE","latitude":x.latitude,"longitude":x.longitude,"risk_score":None,"tamper":False,"online":x.online,"last_seen":x.last_seen.isoformat()} for x in db.query(WebVisitor).filter(WebVisitor.online.is_(True),WebVisitor.latitude.is_not(None),WebVisitor.longitude.is_not(None)).all()]
+    iot_locations=[{"device_id":x.id,"visitor_type":"IOT","latitude":x.latitude,"longitude":x.longitude,"risk_score":x.risk_score,"tamper":x.tamper_detected,"online":x.online,"last_seen":iso_timestamp(x.last_seen)} for x in db.query(Device).all()]
+    web_locations=[{"device_id":x.visitor_id,"visitor_type":"ONLINE","latitude":x.latitude,"longitude":x.longitude,"risk_score":None,"tamper":False,"online":x.online,"last_seen":iso_timestamp(x.last_seen)} for x in db.query(WebVisitor).filter(WebVisitor.online.is_(True),WebVisitor.latitude.is_not(None),WebVisitor.longitude.is_not(None)).all()]
     return iot_locations+web_locations
 @app.get("/api/alerts")
 def alerts(db:Session=Depends(get_db)): return [ser(x) for x in db.query(Alert).filter_by(resolved=False).order_by(desc(Alert.created_at)).limit(30)]

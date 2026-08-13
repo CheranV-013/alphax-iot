@@ -21,6 +21,10 @@ Base.metadata.create_all(bind=engine)
 if "device_type" not in {column["name"] for column in inspect(engine).get_columns("devices")}:
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE devices ADD COLUMN device_type VARCHAR"))
+web_visitor_columns={column["name"] for column in inspect(engine).get_columns("web_visitors")}
+with engine.begin() as connection:
+    if "device_name" not in web_visitor_columns: connection.execute(text("ALTER TABLE web_visitors ADD COLUMN device_name VARCHAR DEFAULT 'Unknown'"))
+    if "browser_version" not in web_visitor_columns: connection.execute(text("ALTER TABLE web_visitors ADD COLUMN browser_version VARCHAR DEFAULT 'Unknown'"))
 ml=MLEngine(settings.model_dir)
 app=FastAPI(title="AlphaX-IoT Fraud Intelligence API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins.split(","), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -32,8 +36,20 @@ class IoTIn(BaseModel):
     tamper_detected:bool|None=None
 class VisitorHeartbeatIn(BaseModel):
     visitor_id:str=Field(min_length=4,max_length=80,pattern=r"^[A-Za-z0-9_-]+$")
+    device_name:str|None=None
+    browser_version:str|None=None
+    device_type:str|None=None
+    os_hint:str|None=None
 class FeedbackIn(BaseModel):
     transaction_id:str; label:str; note:str=""
+class AnalyzeTransactionIn(BaseModel):
+    amount:float=Field(gt=0)
+    user_id:str|None=None
+    device_id:str|None=None
+    ip_address:str="0.0.0.0"
+    latitude:float=0
+    longitude:float=0
+    transaction_velocity:float=Field(default=1,ge=0)
 
 def ser(obj):
     d={c.name:getattr(obj,c.name) for c in obj.__table__.columns}
@@ -78,7 +94,17 @@ def parse_user_agent(user_agent: str):
     if "Mobile" in ua or "iPhone" in ua or "Android" in ua: device="Mobile"
     elif "iPad" in ua: device="Tablet"
     else: device="Desktop"
-    return device,browser,os
+    version="Unknown"
+    marker={"Edge":"Edg/","Chrome":"Chrome/","Firefox":"Firefox/","Safari":"Version/","Opera":"OPR/"}.get(browser)
+    if marker and marker in ua: version=ua.split(marker,1)[1].split(".",1)[0]
+    if "iPhone" in ua: device_name="iPhone"
+    elif "iPad" in ua: device_name="iPad"
+    elif "Android" in ua:
+        fragment=ua.split("Android",1)[1].split(")",1)[0]
+        candidates=[x.strip() for x in fragment.split(";")[1:]]
+        device_name=next((x for x in candidates if x and x not in ("wv","Mobile")),"Unknown")
+    else: device_name="Unknown"
+    return device,browser,os,device_name,version
 
 def geo_for_ip(ip: str):
     unknown={"country":"Unknown","region":"Unknown","city":"Unknown","latitude":None,"longitude":None}
@@ -104,23 +130,41 @@ def mark_stale_visitors(db:Session):
         db.add(Alert(severity="info",title="ONLINE VISITOR OFFLINE",message=f"Visitor {visitor.visitor_id} is no longer active"))
     if stale: db.commit()
 
-def public_web_visitor(visitor:WebVisitor):
-    return {"visitor_id":visitor.visitor_id,"visitor_type":"ONLINE","name":f"Visitor {visitor.visitor_id}","device_type":visitor.device_type,"browser":visitor.browser,"os":visitor.operating_system,"country":visitor.country,"region":visitor.region,"city":visitor.city,"latitude":visitor.latitude,"longitude":visitor.longitude,"online":visitor.online,"last_seen":visitor.last_seen.isoformat(),"first_seen":visitor.first_seen.isoformat()}
+def public_web_visitor(visitor:WebVisitor, include_ip=False):
+    result={"id":visitor.visitor_id,"visitor_id":visitor.visitor_id,"visitor_type":"ONLINE","name":f"Visitor {visitor.visitor_id}","device_type":visitor.device_type,"device_name":visitor.device_name,"browser":visitor.browser,"browser_version":visitor.browser_version,"os":visitor.operating_system,"country":visitor.country,"region":visitor.region,"city":visitor.city,"latitude":visitor.latitude,"longitude":visitor.longitude,"online":visitor.online,"last_seen":visitor.last_seen.isoformat(),"first_seen":visitor.first_seen.isoformat()}
+    if include_ip: result["ip_address"]=visitor.ip_address
+    return result
 
 def public_iot_visitor(device:Device):
     return {"visitor_id":device.id,"id":device.id,"visitor_type":"IOT","name":device.name,"device_type":device.device_type or "IoT Device","latitude":device.latitude,"longitude":device.longitude,"online":device.online,"last_seen":device.last_seen.isoformat(),"vibration":device.vibration,"tamper_detected":device.tamper_detected,"risk_score":device.risk_score}
-def evaluate(db,tx):
-    dev=db.get(Device,tx.device_id); r=assess(tx,user_ctx(db,tx.user_id),dev,ml); db.add(RiskAssessment(transaction_id=tx.id,**r)); tx.status=r["decision"]
-    if r["decision"] in ("REVIEW","BLOCK"): db.add(Alert(severity="critical" if r["decision"]=="BLOCK" else "warning",title="HIGH RISK TRANSACTION",message=f"{tx.id} scored {r['final_risk_score']:.0f}. Decision: {r['decision']}",transaction_id=tx.id,device_id=tx.device_id))
+def evaluate(db,tx,model_amount=None):
+    dev=db.get(Device,tx.device_id); r=assess(tx,user_ctx(db,tx.user_id),dev,ml,model_amount=model_amount); db.add(RiskAssessment(transaction_id=tx.id,**r)); tx.status=r["decision"]
+    if tx.amount>=settings.transaction_limit:
+        db.add(Alert(severity="critical" if r["decision"]=="BLOCK" else "warning",title="HIGH VALUE TRANSACTION",message=f"Amount: {tx.amount:.2f}. Risk: {r['final_risk_score']:.0f}. Decision: {r['decision']}. Exceeds configured threshold {settings.transaction_limit:.2f}.",transaction_id=tx.id,device_id=tx.device_id))
+    elif r["decision"] in ("REVIEW","BLOCK"):
+        db.add(Alert(severity="critical" if r["decision"]=="BLOCK" else "warning",title="HIGH RISK TRANSACTION",message=f"{tx.id} scored {r['final_risk_score']:.0f}. Decision: {r['decision']}",transaction_id=tx.id,device_id=tx.device_id))
     db.commit(); return r
 
 @app.get("/api/health")
 def health(): return {"status":"ok","service":"alphax-iot","ml":"isolation-forest + random-forest","mode":"demo-ready"}
+@app.get("/api/config/public")
+def public_config(): return {"transaction_limit":settings.transaction_limit,"visitor_inactivity_seconds":settings.visitor_inactivity_seconds}
 @app.post("/api/transactions")
 def create_tx(payload:TxIn,db:Session=Depends(get_db)):
     if not db.get(User,payload.user_id): raise HTTPException(404,"Unknown user")
     if not db.get(Device,payload.device_id): raise HTTPException(404,"Unknown device")
     tx=Transaction(id=f"TXN-{random.randint(10000,99999)}",timestamp=datetime.now(timezone.utc),**payload.model_dump()); db.add(tx); db.commit(); db.refresh(tx); r=evaluate(db,tx); return tx_json(tx,db.query(RiskAssessment).filter_by(transaction_id=tx.id).first())
+@app.post("/api/transactions/analyze")
+def analyze_transaction(payload:AnalyzeTransactionIn,db:Session=Depends(get_db)):
+    user_id=payload.user_id or "SYSTEM-ANALYZER"
+    if not db.get(User,user_id): db.add(User(id=user_id,name="Dashboard Analyst",email="analyst@alphax.local",baseline_spend=settings.transaction_limit)); db.commit()
+    tx=Transaction(id=f"ANL-{random.randint(100000,999999)}",user_id=user_id,amount=payload.amount,timestamp=utcnow(),merchant="Dashboard Transaction Monitor",ip_address=payload.ip_address,device_id=payload.device_id or "WEB-ANALYZER",latitude=payload.latitude,longitude=payload.longitude,transaction_velocity=payload.transaction_velocity,status="PENDING")
+    db.add(tx); db.commit(); db.refresh(tx)
+    normalized_model_amount=min((payload.amount/max(settings.transaction_limit,1))*500,500)
+    r=evaluate(db,tx,model_amount=normalized_model_amount)
+    assessment=db.query(RiskAssessment).filter_by(transaction_id=tx.id).first()
+    high=payload.amount>=settings.transaction_limit
+    return {"transaction_id":tx.id,"amount":payload.amount,"threshold":settings.transaction_limit,"status":"HIGH_RISK" if high else "NORMAL","risk_score":round(r["final_risk_score"],1),"decision":r["decision"],"alert":high,"reason":"Transaction exceeds configured threshold." if high else "Below configured threshold.","risk":ser(assessment)}
 @app.get("/api/transactions")
 def transactions(limit:int=50,db:Session=Depends(get_db)):
     rows=[]
@@ -160,15 +204,18 @@ def device(id:str,db:Session=Depends(get_db)):
 
 @app.post("/api/visitor/heartbeat")
 def visitor_heartbeat(payload:VisitorHeartbeatIn, request:Request, db:Session=Depends(get_db)):
-    now=utcnow(); existing=db.get(WebVisitor,payload.visitor_id); was_online=bool(existing and existing.online)
+    now=utcnow(); existing=db.get(WebVisitor,payload.visitor_id); was_online=bool(existing and existing.online); current_ip=request_ip(request)
     user_agent=request.headers.get("user-agent","")
-    device_type,browser,operating_system=parse_user_agent(user_agent)
+    device_type,browser,operating_system,parsed_device_name,parsed_browser_version=parse_user_agent(user_agent)
+    device_type=payload.device_type or device_type; device_name=payload.device_name or parsed_device_name; browser_version=payload.browser_version or parsed_browser_version; operating_system=payload.os_hint or operating_system
     if not existing:
-        geo=geo_for_ip(request_ip(request))
-        existing=WebVisitor(visitor_id=payload.visitor_id,ip_address=request_ip(request),country=geo["country"],region=geo["region"],city=geo["city"],latitude=geo["latitude"],longitude=geo["longitude"],device_type=device_type,browser=browser,operating_system=operating_system,user_agent=user_agent,first_seen=now,last_seen=now,online=True)
+        geo=geo_for_ip(current_ip)
+        existing=WebVisitor(visitor_id=payload.visitor_id,ip_address=current_ip,country=geo["country"],region=geo["region"],city=geo["city"],latitude=geo["latitude"],longitude=geo["longitude"],device_type=device_type,device_name=device_name,browser=browser,browser_version=browser_version,operating_system=operating_system,user_agent=user_agent,first_seen=now,last_seen=now,online=True)
         db.add(existing)
     else:
-        existing.last_seen=now; existing.online=True; existing.device_type=device_type; existing.browser=browser; existing.operating_system=operating_system; existing.user_agent=user_agent
+        if existing.ip_address!=current_ip:
+            geo=geo_for_ip(current_ip); existing.ip_address=current_ip; existing.country=geo["country"]; existing.region=geo["region"]; existing.city=geo["city"]; existing.latitude=geo["latitude"]; existing.longitude=geo["longitude"]
+        existing.last_seen=now; existing.online=True; existing.device_type=device_type; existing.device_name=device_name; existing.browser=browser; existing.browser_version=browser_version; existing.operating_system=operating_system; existing.user_agent=user_agent
     if not was_online:
         db.add(Alert(severity="info",title="ONLINE VISITOR",message=f"Visitor {payload.visitor_id} connected"))
     db.commit(); db.refresh(existing)
@@ -179,12 +226,28 @@ def online_visitors(db:Session=Depends(get_db)):
     mark_stale_visitors(db)
     return [public_web_visitor(v) for v in db.query(WebVisitor).filter_by(online=True).order_by(desc(WebVisitor.last_seen)).all()]
 
+@app.get("/api/admin/online-visitors")
+def admin_online_visitors(db:Session=Depends(get_db)):
+    mark_stale_visitors(db)
+    return [public_web_visitor(v,include_ip=True) for v in db.query(WebVisitor).filter_by(online=True).order_by(desc(WebVisitor.last_seen)).all()]
+
 @app.get("/api/live-visitors")
 def visitors(db:Session=Depends(get_db)):
     mark_stale_visitors(db)
     iot_visitors=[public_iot_visitor(x) for x in db.query(Device).order_by(desc(Device.last_seen)).all()]
     web_visitors=[public_web_visitor(x) for x in db.query(WebVisitor).filter_by(online=True).order_by(desc(WebVisitor.last_seen)).all()]
     return iot_visitors+web_visitors
+@app.get("/api/admin/live-visitors")
+def admin_live_visitors(db:Session=Depends(get_db)):
+    mark_stale_visitors(db)
+    web=[]
+    for visitor in db.query(WebVisitor).filter_by(online=True).all():
+        item=public_web_visitor(visitor,include_ip=True)
+        item["name"]=f"Visitor {visitor.visitor_id} · IP: {visitor.ip_address or 'Unknown'}"
+        if visitor.device_name and visitor.device_name!="Unknown": item["device_type"]=f"{visitor.device_type} · {visitor.device_name}"
+        if visitor.browser_version and visitor.browser_version!="Unknown": item["browser"]=f"{visitor.browser} {visitor.browser_version}"
+        web.append(item)
+    return [public_iot_visitor(x) for x in db.query(Device).all()]+web
 @app.get("/api/location-data")
 def locations(db:Session=Depends(get_db)):
     mark_stale_visitors(db)

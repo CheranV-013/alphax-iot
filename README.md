@@ -60,6 +60,7 @@ Keep Render CORS configured with:
 
 ```text
 CORS_ORIGINS=https://alphax-iot.vercel.app,http://localhost:5173
+TRANSACTION_LIMIT=100000
 ```
 
 Optional IP geolocation settings are:
@@ -79,3 +80,6 @@ New APIs:
 - `GET /api/online-visitors` — active web visitors only, with no raw IP.
 - `GET /api/live-visitors` — unified IoT and ONLINE visitor response.
 - `GET /api/location-data` — unified exact IoT and approximate web coordinates.
+- `GET /api/admin/online-visitors` and `GET /api/admin/live-visitors` — dashboard/admin-shaped feeds that include stored IP addresses; add authentication before exposing these beyond the demo.
+- `POST /api/transactions/analyze` — analyzes a dashboard amount against the configured transaction limit and persists a risk assessment/alert.
+- `GET /api/config/public` — exposes non-sensitive runtime thresholds to the dashboard.

@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     ip_geolocation_url: str = ""
     ip_geolocation_api_key: str = ""
     trust_proxy_headers: bool = True
+    transaction_limit: float = 100000
+    amount_threshold_weight: float = 0.25
     class Config:
         env_file = ".env"
 

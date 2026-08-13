@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Node
+node_modules/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Python cache
+.pytest_cache/
+
+# ML/cache
+__pycache__/
+*.pkl.tmp
+
+# Logs
+*.logbackend/alphax.db
+backend/models/
+alphax.db
+models/
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+.env

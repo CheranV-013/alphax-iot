@@ -43,6 +43,24 @@ def test_visitor_expiry_and_transactions():
     assert (normal["status"], normal["decision"], normal["alert"]) == ("NORMAL", "ALLOW", False)
     assert (high["status"], high["decision"], high["alert"]) == ("HIGH_RISK", "REVIEW", True)
 
+def test_gps_heartbeat_updates_one_visitor_and_live_api():
+    headers = {"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1"}
+    first = {"visitor_id": "GPS-VISITOR", "latitude": 11.013671, "longitude": 77.045553, "location_accuracy": 8.0, "location_source": "GPS"}
+    second = {**first, "latitude": 11.0137, "longitude": 77.0456, "location_accuracy": 6.5}
+    assert client.post("/api/visitor/heartbeat", json=first, headers=headers).json()["location_source"] == "GPS"
+    response = client.post("/api/visitor/heartbeat", json=second, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["latitude"] == second["latitude"]
+    assert response.json()["longitude"] == second["longitude"]
+    assert response.json()["location_accuracy"] == second["location_accuracy"]
+    live = client.get("/api/admin/live-visitors").json()
+    visitor = next(item for item in live if item["visitor_id"] == "GPS-VISITOR")
+    assert visitor["latitude"] == second["latitude"]
+    assert visitor["longitude"] == second["longitude"]
+    assert visitor["location_source"] == "GPS"
+    with SessionLocal() as db:
+        assert db.query(WebVisitor).filter_by(visitor_id="GPS-VISITOR").count() == 1
+
 def test_iot_regression():
     payload = {"device_id": "ESP001", "latitude": 11.013671, "longitude": 77.045553, "vibration": 0, "tamper_detected": False, "online": True}
     assert client.post("/api/iot/data", json=payload).status_code == 200

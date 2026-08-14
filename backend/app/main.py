@@ -307,10 +307,10 @@ def visitor_heartbeat(payload:VisitorHeartbeatIn, request:Request, db:Session=De
     user_agent=request.headers.get("user-agent","")
     device_type,browser,operating_system,parsed_device_name,parsed_browser_version=parse_user_agent(user_agent)
     device_type=payload.device_type or device_type; device_name=payload.device_name or parsed_device_name; browser_version=payload.browser_version or parsed_browser_version; operating_system=payload.os_hint or operating_system
-    # Resolve before touching the request-scoped DB session. Results are cached
-    # by IP, so normal heartbeats never perform an external lookup.
-    geo=geo_for_ip(current_ip)
     has_gps=payload.latitude is not None and payload.longitude is not None and payload.location_source == "GPS"
+    # GPS is the primary location. Do not make a visitor heartbeat wait on an
+    # external IP lookup when the browser has already supplied a fresh fix.
+    geo=geo_for_ip(current_ip) if not has_gps else {"country":"Unknown","region":"Unknown","city":"Unknown","latitude":None,"longitude":None}
     existing=db.get(WebVisitor,payload.visitor_id); was_online=bool(existing and existing.online)
     if not existing:
         existing=WebVisitor(visitor_id=payload.visitor_id,ip_address=current_ip,country=geo["country"],region=geo["region"],city=geo["city"],latitude=payload.latitude if has_gps else geo["latitude"],longitude=payload.longitude if has_gps else geo["longitude"],location_accuracy=payload.location_accuracy if has_gps else None,location_source="GPS" if has_gps else ("IP" if geo["latitude"] is not None else "UNKNOWN"),device_type=device_type,device_name=device_name,browser=browser,browser_version=browser_version,operating_system=operating_system,user_agent=user_agent,first_seen=now,last_seen=now,online=True)
@@ -336,6 +336,8 @@ def visitor_heartbeat(payload:VisitorHeartbeatIn, request:Request, db:Session=De
         existing=db.get(WebVisitor,payload.visitor_id)
         if not existing: raise
         existing.ip_address=current_ip; existing.last_seen=now; existing.online=True; existing.device_type=device_type; existing.device_name=device_name; existing.browser=browser; existing.browser_version=browser_version; existing.operating_system=operating_system; existing.user_agent=user_agent
+        if has_gps:
+            existing.latitude=payload.latitude; existing.longitude=payload.longitude; existing.location_accuracy=payload.location_accuracy; existing.location_source="GPS"
         db.commit()
     db.refresh(existing)
     return public_web_visitor(existing)

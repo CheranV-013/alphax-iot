@@ -82,3 +82,14 @@ def test_individual_tracking_endpoint():
     assert response.json()["visitor_id"] == "TEST-VISITOR"
     assert response.json()["ip_address"] == "198.51.100.30"
     assert client.get("/api/admin/live-visitors/does-not-exist").status_code == 404
+
+def test_phone_gps_updates_same_visitor_and_admin_api():
+    headers = {"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Version/17 Safari/604.1", "x-forwarded-for": "198.51.100.32"}
+    first = {"visitor_id": "GPS-REGRESSION", "latitude": 11.013671, "longitude": 77.045553, "location_accuracy": 8.2, "location_source": "GPS", "device_name": "iPhone", "device_type": "Mobile", "os_hint": "iOS"}
+    second = {**first, "latitude": 11.013721, "longitude": 77.045592}
+    assert client.post("/api/visitor/heartbeat", json=first, headers=headers).status_code == 200
+    assert client.post("/api/visitor/heartbeat", json=second, headers=headers).status_code == 200
+    with SessionLocal() as db:
+        assert db.query(WebVisitor).filter_by(visitor_id="GPS-REGRESSION").count() == 1
+    item = next(v for v in client.get("/api/admin/live-visitors").json() if v["visitor_id"] == "GPS-REGRESSION")
+    assert (item["latitude"], item["longitude"], item["location_source"], item["location_accuracy"]) == (11.013721, 77.045592, "GPS", 8.2)

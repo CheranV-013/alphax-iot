@@ -83,13 +83,17 @@ def user_ctx(db,user_id):
 def transaction_actor(db:Session, tx:Transaction):
     if tx.visitor_id:
         visitor=db.get(WebVisitor,tx.visitor_id)
-        if visitor: return {"visitor_id":visitor.visitor_id,"device":visitor.device_name or visitor.device_type,"browser":visitor.browser,"os":visitor.operating_system,"ip":visitor.ip_address,"device_type":visitor.device_type}
+        if visitor:
+            return {"visitor_id":visitor.visitor_id,"device":visitor.device_name or visitor.device_type,"browser":visitor.browser,"os":visitor.operating_system,"ip":visitor.ip_address,"device_type":visitor.device_type,"online":visitor.online,"last_seen":iso_timestamp(visitor.last_seen),"location":{"source":visitor.location_source,"latitude":visitor.latitude,"longitude":visitor.longitude,"accuracy":visitor.location_accuracy}}
     if tx.device_id:
         device=db.get(Device,tx.device_id)
-        if device: return {"device_id":device.id,"device":device.name,"device_type":device.device_type,"browser":None,"os":None,"ip":None}
+        if device: return {"device_id":device.id,"device":device.name,"device_type":device.device_type,"online":device.online,"last_seen":iso_timestamp(device.last_seen),"location":{"source":"GPS","latitude":device.latitude,"longitude":device.longitude,"accuracy":None}}
     return None
 def transaction_location(tx):
     return {"latitude":tx.latitude,"longitude":tx.longitude,"source":tx.location_source or "UNKNOWN","accuracy":tx.location_accuracy}
+
+def current_actor_location(actor):
+    return actor.get("location") if actor else None
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -255,7 +259,8 @@ def investigate_transaction(transaction_id:str,db:Session=Depends(get_db)):
     t=db.get(Transaction,transaction_id)
     if not t: raise HTTPException(404,"Transaction not found")
     risk=db.query(RiskAssessment).filter_by(transaction_id=t.id).first(); actor=transaction_actor(db,t); visitor=db.get(WebVisitor,t.visitor_id) if t.visitor_id else None
-    return {"transaction":tx_json(t,risk),"actor":actor,"location":transaction_location(t),"last_visitor_activity":iso_timestamp(visitor.last_seen) if visitor else None,"risk":ser(risk) if risk else None,"visitor_history":[tx_json(x,db.query(RiskAssessment).filter_by(transaction_id=x.id).first()) for x in db.query(Transaction).filter(Transaction.visitor_id==t.visitor_id).order_by(desc(Transaction.timestamp)).all()] if t.visitor_id else []}
+    live_location=current_actor_location(actor) or transaction_location(t)
+    return {"transaction":tx_json(t,risk),"current_actor":actor,"actor":actor,"location":live_location,"last_visitor_activity":actor.get("last_seen") if actor else None,"risk":ser(risk) if risk else None,"visitor_history":[tx_json(x,db.query(RiskAssessment).filter_by(transaction_id=x.id).first()) for x in db.query(Transaction).filter(Transaction.visitor_id==t.visitor_id).order_by(desc(Transaction.timestamp)).all()] if t.visitor_id else []}
 @app.get("/api/transactions/{id}")
 def transaction(id:str,db:Session=Depends(get_db)):
     t=db.get(Transaction,id); r=db.query(RiskAssessment).filter_by(transaction_id=id).first()
